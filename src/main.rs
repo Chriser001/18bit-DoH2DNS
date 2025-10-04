@@ -36,8 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ip_infos = Vec::new();
     for ip in &ips {
         let client = Client::builder()
-            。resolve("doh.18bit.cn", *ip)
-            。build()?;
+            .resolve("doh.18bit.cn", *ip)
+            .build()?;
         clients.insert(*ip, client);
         ip_infos.push(IpInfo {
             addr: *ip,
