@@ -23,10 +23,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
+    # 使用官方推荐的 Rust 安装 Action
     - name: Install Rust
-      uses: actions-rust-lang/setup-rust@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
-        rust-version: stable
+        toolchain: stable
     
     - name: Build
       run: cargo build --verbose
@@ -43,10 +44,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       
+    # 使用官方推荐的 Rust 安装 Action
     - name: Install Rust
-      uses: actions-rust-lang/setup-rust@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
-        rust-version: stable
+        toolchain: stable
         targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, x86_64-apple-darwin
     
     - name: Build Release Binaries
@@ -66,7 +68,6 @@ jobs:
         tar czf release/${{ env.PROJECT_NAME }}-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release ${{ env.PROJECT_NAME }}
         
     - name: Create Release
-      id: create_release
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ github.ref_name }}
