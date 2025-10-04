@@ -1,0 +1,21 @@
+[package]
+name = "doh-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros"] }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+lru = "0.12"
+dns-parser = "0.8"
+chrono = "0.4"
+fastrand = "2.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+incremental = false
