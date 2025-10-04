@@ -1,10 +1,11 @@
-name: Rust CI
+name: Build and Release
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    标签:
+      - 'v*' # 触发条件可以是推送到标签（如 v1.0.0）
+    branches:
+      - main # 或者只在 main 分支推送时触发
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,21 +14,71 @@ jobs:
   build:
     strategy:
       matrix:
-        platform: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.platform }}
-
+        target: [
+          x86_64-unknown-linux-gnu,
+          x86_64-pc-windows-msvc，
+          x86_64-apple-darwin，
+        ]
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     
-    - name: Install Rust
+    - name: Install Rust toolchain
       uses: actions-rs/toolchain@v1
       with:
         profile: minimal
         toolchain: stable
+        targets: ${{ matrix.target }}
         override: true
     
-    - name: Build
-      run: cargo build --verbose
+    - name: Build release binary
+      run: cargo build --release --target ${{ matrix.target }}
     
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Rename binaries (optional)
+      run: |
+        # 根据不同平台重命名二进制文件
+        if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+          mv target/${{ matrix.target }}/release/your_binary_name your_binary_name-linux-x86_64
+        elif [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+          mv target/${{ matrix.target }}/release/your_binary_name.exe your_binary_name-windows-x86_64.exe
+        elif [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+          mv target/${{ matrix.target }}/release/your_binary_name your_binary_name-macos-x86_64
+        fi
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-${{ matrix.target }}
+        path: |
+          your_binary_name-*
+          # 如果有其他文件也要发布，可以在这里添加
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+    
+    - name: Upload Release Assets
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./artifacts/binaries-${{ matrix.target }}/your_binary_name-*
+        asset_name: your_binary_name-*
+        asset_content_type: application/octet-stream
