@@ -8,7 +8,9 @@ use chrono::Local;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{interval, Duration};
-use fastrand;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static REQUEST_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 struct IpInfo {
     addr: std::net::SocketAddr,
@@ -19,19 +21,19 @@ struct IpInfo {
 const MAX_RECENT_TIMES: usize = 10;
 const RESPONSE_TIMEOUT_MS: f64 = 1000.0;
 const WEIGHT_BOOST_FACTOR: f64 = 0.2;
-const WEIGHT_DECAY_FACTOR: f64 = 0.7;
-const MIN_WEIGHT: f64 = 0.3;
+const WEIGHT_DECAY_FACTOR: f64 = 0.9; // 提高衰减因子，使权重降低更平缓
+const MIN_WEIGHT: f64 = 0.0001; // 设置最小权重为0.0001，确保永远不会为0或负数
 const MAX_WEIGHT: f64 = 1.0;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Resolve IPs for doh.18bit.cn from 1.1.1.1:53
+    // 从 1.1.1.1:53 解析 doh.18bit.cn 的IP地址列表
     let ips = resolve_ips().await?;
     if ips.is_empty() {
         return Err("No IPs resolved for doh.18bit.cn".into());
     }
 
-    // Create clients for each IP with resolve
+    // 为每个解析到的IP创建客户端
     let mut clients = HashMap::new();
     let mut ip_infos = Vec::new();
     for ip in &ips {
@@ -46,28 +48,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Wrap in Arc<Mutex> for sharing between tasks
+    // 使用 Arc<Mutex> 包装以便在任务间共享
     let clients = Arc::new(Mutex::new(clients));
     let ip_infos = Arc::new(Mutex::new(ip_infos));
-    let cache = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(3000).unwrap())));
+    let cache = Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(10000).unwrap())));// 增加缓存容量到10000条
 
-    // Clone for timers
+    // 克隆用于定时器
     let ip_infos_timer1 = ip_infos.clone();
     let ip_infos_timer2 = ip_infos.clone();
     let clients_timer = clients.clone();
 
-    // Start weight recalculation timer (every 5 minutes)
+    // 启动权重重新计算定时器（每60分钟执行一次）
     tokio::spawn(async move {
-        let mut interval = interval(Duration::from_secs(300)); // 5 minutes
+        let mut interval = interval(Duration::from_secs(3600)); // 60分钟
         loop {
             interval.tick().await;
             recalculate_weights(&ip_infos_timer1).await;
         }
     });
 
-    // Start IP refresh timer (every 12 hours)
+    // 启动IP刷新定时器（每24小时执行一次）
     tokio::spawn(async move {
-        let mut interval = interval(Duration::from_secs(43200)); // 12 hours
+        let mut interval = interval(Duration::from_secs(86400)); // 24 hours
         loop {
             interval.tick().await;
             if let Err(e) = refresh_ips(&clients_timer, &ip_infos_timer2).await {
@@ -94,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (len, addr) = socket.recv_from(&mut buf).await?;
         let query = buf[..len].to_vec();
 
-        // Spawn a task to handle this query
+        // 创建一个新任务来处理这个查询请求
         let clients_clone = clients.clone();
         let ip_infos_clone = ip_infos.clone();
         let cache_clone = cache.clone();
@@ -119,16 +121,16 @@ async fn handle_query(
     let mut cache_key = query.clone();
     cache_key[0..2].fill(0); // Zero out the query ID for caching purposes
 
-    // Parse domain from query
+    // 从查询中解析域名
     let domain = extract_domain_from_query(&query);
 
-    // Check cache
+    // 检查缓存
     {
         let mut cache_guard = cache.lock().await;
         if let Some((resp, expiry)) = cache_guard.get(&cache_key) {
             if expiry > &std::time::Instant::now() {
                 let mut resp = resp.clone();
-                resp[0..2].copy_from_slice(&query[0..2]); // Set response ID to match query ID
+                resp[0..2].copy_from_slice(&query[0..2]); // 设置响应ID与查询ID匹配
                 response_tx.send((resp, addr)).await?;
                 return Ok(());
             }
@@ -143,7 +145,7 @@ async fn handle_query(
     }
 
     let mut attempts = 0;
-    let max_attempts = 3;
+    let max_attempts = 3; // 最大重试次数
     let mut response = None;
     let mut total_duration = std::time::Duration::default();
     let mut final_chosen_index = chosen_index;
@@ -180,7 +182,7 @@ async fn handle_query(
         if attempts < max_attempts {
             // Retry same IP
         } else {
-            // Switch to next IP
+            // 切换到下一个IP
             {
                 let ip_infos_guard = ip_infos.lock().await;
                 chosen_index = (chosen_index + 1) % ip_infos_guard.len();
@@ -196,18 +198,38 @@ async fn handle_query(
         }
         println!("{}: {} - {} - {:.2}ms", Local::now().format("%Y-%m-%d %H:%M:%S %z"), chosen_addr.ip(), domain, duration_ms);
 
+        // 增加请求计数并检查是否需要打印权重信息
+        // 使用取模运算保持计数器在合理范围内（1000000表示100万）
+        let count = (REQUEST_COUNT.fetch_add(1, Ordering::Relaxed) % 1000000) + 1;
+        
+        // 每100个请求打印一次统计信息
+        if count % 100 == 0 {
+            let total_count = REQUEST_COUNT.load(Ordering::Relaxed);
+            println!("{}: Processed {} requests (total: {}), current IP weights:", 
+                Local::now().format("%Y-%m-%d %H:%M:%S %z"), 
+                count,
+                total_count
+            );
+            {
+                let ip_infos_guard = ip_infos.lock().await;
+                for info in ip_infos_guard.iter() {
+                    println!("  {}: weight={:.4}", info.addr.ip(), info.weight);
+                }
+            }
+        }
+
         let resp_vec = data.to_vec();
 
-        // Cache the response with TTL 3600 seconds
+        // 缓存响应，TTL为3600秒
         {
             let mut cache_guard = cache.lock().await;
             cache_guard.put(cache_key, (resp_vec.clone(), std::time::Instant::now() + std::time::Duration::from_secs(3600)));
         }
 
-        // Send response back to client
+        // 发送响应回客户端
         response_tx.send((resp_vec, addr)).await?;
     } else {
-        // All attempts failed, update weight for last tried IP
+        //所有尝试失败，更新最后尝试的IP的权重
         {
             let mut ip_infos_guard = ip_infos.lock().await;
             update_weight(&mut ip_infos_guard[chosen_index], total_duration.as_millis() as f64, false);
@@ -219,12 +241,38 @@ async fn handle_query(
 
 async fn recalculate_weights(ip_infos: &Arc<Mutex<Vec<IpInfo>>>) {
     let mut ip_infos_guard = ip_infos.lock().await;
-    // Reset weights to 1.0 for all IPs
     for info in ip_infos_guard.iter_mut() {
-        info.weight = 1.0;
-        info.recent_times.clear();
+        if !info.recent_times.is_empty() {
+            // 使用最近的响应时间计算新权重
+            let avg_time: f64 = info.recent_times.iter().sum::<f64>() / info.recent_times.len() as f64;
+            if avg_time < RESPONSE_TIMEOUT_MS {
+                // 使用平均响应时间计算新权重
+                let new_weight = ((RESPONSE_TIMEOUT_MS - avg_time) / RESPONSE_TIMEOUT_MS)
+                    .max(MIN_WEIGHT)
+                    .min(MAX_WEIGHT);
+                // 平滑过渡到新权重
+                info.weight = (info.weight * 0.3 + new_weight * 0.7).max(MIN_WEIGHT).min(MAX_WEIGHT);
+            } else {
+                // 如果平均响应时间超过超时时间，降低权重
+                info.weight = (info.weight * WEIGHT_DECAY_FACTOR).max(MIN_WEIGHT);
+            }
+        }
+        // 保留历史记录，但限制数量
+        while info.recent_times.len() > MAX_RECENT_TIMES {
+            info.recent_times.pop_front();
+        }
     }
+    
+    // 打印当前所有IP的权重情况
     println!("{}: Weights recalculated", Local::now().format("%Y-%m-%d %H:%M:%S %z"));
+    for info in ip_infos_guard.iter() {
+        let avg_time = if !info.recent_times.is_empty() {
+            info.recent_times.iter().sum::<f64>() / info.recent_times.len() as f64
+        } else {
+            0.0
+        };
+        println!("  {}: weight={:.4}, avg_time={:.2}ms", info.addr.ip(), info.weight, avg_time);
+    }
 }
 
 async fn refresh_ips(
@@ -240,11 +288,11 @@ async fn refresh_ips(
     let mut clients_guard = clients.lock().await;
     let mut ip_infos_guard = ip_infos.lock().await;
 
-    // Clear old data
+    // 清除旧IP
     clients_guard.clear();
     ip_infos_guard.clear();
 
-    // Add new IPs
+    // 添加新IP
     for ip in &new_ips {
         let client = Client::builder()
             .resolve("doh.18bit.cn", *ip)
@@ -263,7 +311,7 @@ async fn refresh_ips(
 
 fn choose_ip_index(ip_infos: &Vec<IpInfo>) -> usize {
     if ip_infos.is_empty() {
-        panic!("No IPs available");
+        panic!("no available ip address");
     }
     let total_weight: f64 = ip_infos.iter().map(|i| i.weight).sum();
     if total_weight == 0.0 {
@@ -280,16 +328,46 @@ fn choose_ip_index(ip_infos: &Vec<IpInfo>) -> usize {
 }
 
 fn update_weight(info: &mut IpInfo, duration_ms: f64, is_success: bool) {
-    if is_success && duration_ms < RESPONSE_TIMEOUT_MS {
-        let boost = (RESPONSE_TIMEOUT_MS - duration_ms) / RESPONSE_TIMEOUT_MS * WEIGHT_BOOST_FACTOR;
-        info.weight = (info.weight + boost).min(MAX_WEIGHT);
-        info.recent_times.push_back(duration_ms);
-        if info.recent_times.len() > MAX_RECENT_TIMES {
-            info.recent_times.pop_front();
+    // 记录响应时间，包括失败的请求（用超时时间记录）
+    info.recent_times.push_back(if is_success { duration_ms } else { RESPONSE_TIMEOUT_MS });
+    
+    // 维护最近响应时间队列
+    while info.recent_times.len() > MAX_RECENT_TIMES {
+        info.recent_times.pop_front();
+    }
+
+    // 计算最近请求的平均响应时间
+    let avg_time = info.recent_times.iter().sum::<f64>() / info.recent_times.len() as f64;
+    
+    if is_success {
+        if duration_ms < RESPONSE_TIMEOUT_MS {
+            // 使用更精细的响应质量计算
+            let response_quality = ((RESPONSE_TIMEOUT_MS - avg_time) / RESPONSE_TIMEOUT_MS).max(0.0);
+            let dynamic_boost = (WEIGHT_BOOST_FACTOR * 0.05) * response_quality * response_quality;
+            
+            // 平滑权重调整
+            let new_weight = (info.weight + dynamic_boost).min(MAX_WEIGHT);
+            // 使用指数移动平均，保持权重变化平滑
+            info.weight = info.weight * 0.8 + new_weight * 0.2;
+        } else {
+            // 响应超时但成功，轻微降低权重
+            let decay = 0.98; // 更温和的衰减
+            info.weight = (info.weight * decay).max(MIN_WEIGHT);
         }
     } else {
-        info.weight = (info.weight * WEIGHT_DECAY_FACTOR).max(MIN_WEIGHT);
+        // 请求失败时的权重调整
+        let severity = (duration_ms / RESPONSE_TIMEOUT_MS).min(2.0); // 限制惩罚程度
+        let decay = WEIGHT_DECAY_FACTOR.powf(severity); // 根据超时程度调整衰减
+        
+        // 确保新权重不会小于最小值
+        let new_weight = (info.weight * decay).max(MIN_WEIGHT);
+        // 平滑过渡到新权重
+        info.weight = (info.weight * 0.7 + new_weight * 0.3).max(MIN_WEIGHT);
     }
+
+    // 确保最终权重在合法范围内，并保持4位小数精度
+    info.weight = (info.weight * 10000.0).round() / 10000.0;
+    info.weight = info.weight.max(MIN_WEIGHT).min(MAX_WEIGHT);
 }
 
 fn extract_domain_from_query(query: &[u8]) -> String {
