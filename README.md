@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/badge/GitHub%20Copilot-Enabled-000000?style=flat&logo=github&logoColor=white" alt="GitHub Copilot">
   </p>
   <p>
-    <img src="https://img.shields.io/badge/Windsurf-Powered-00BCF2?style=flat&logo=visual-studio-code&logoColor=white" alt="Windsurf">
+    <img src="https://img.shields.io/badge/Windsurf-Powered-f8f2e7?style=flat&logo=visual-studio-code&logoColor=white" alt="Windsurf">
     <img src="https://img.shields.io/badge/Code--Supernova-AI%20Assistant-8A2BE2?style=flat&logo=openai&logoColor=white" alt="Code-Supernova">
     <img src="https://img.shields.io/badge/Claude%20Sonnet%203.5-Advanced%20AI-8B5CF6?style=flat&logo=anthropic&logoColor=white" alt="Claude Sonnet 3.5">
   </p>
