@@ -18,6 +18,44 @@ use axum::{
 use serde::Serialize;
 
 
+// 解析黑名单：这些域名及其子域名将被直接拒绝，不进行DoH解析
+const DOMAIN_BLACKLIST: &[&str] = &[
+    "tdum.alibaba.com",
+    "jddebug.com",
+    "ios.rqd.qq.com",
+    "beacon.qq.com",
+    "h.trace.qq.com",
+    "snowflake.qq.com",
+    "oth.str.mdt.qq.com",
+    "tpstelemetry.tencent.com",
+    "ias.tencent-cloud.net",
+    "rmonitor.qq.com",
+    "teg.tencent-cloud.net",
+    "dns.weixin.qq.com.cn",
+    "aliyunga0018.com",
+    "umdcv4.taobao.com",
+    "mmstat.com",
+    "sentry.io",
+    "app-analytics-services.com",
+    "xp.apple.com"
+  ];
+
+// 检查域名是否在黑名单中（支持子域名匹配）
+fn is_domain_blocked(domain: &str) -> bool {
+    DOMAIN_BLACKLIST.iter().any(|&blocked| {
+        // 精确匹配
+        if domain == blocked {
+            return true;
+        }
+        // 子域名匹配：检查是否以黑名单域名结尾
+        if domain.ends_with(&format!(".{}", blocked)) {
+            return true;
+        }
+        false
+    })
+}
+
+// 全局统计计数器
 static REQUEST_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
 static CACHE_MISSES: AtomicUsize = AtomicUsize::new(0);
@@ -94,11 +132,11 @@ const MIN_WEIGHT: f64 = 0.0001; // 最小权重
 const MAX_WEIGHT: f64 = 1.0; // 最大权重
 
 // 缓存相关常量
-const DEFAULT_TTL: u64 = 28800;        // 默认缓存8小时
-const MIN_TTL: u64 = 14400;            // 最小缓存4小时
-const MAX_TTL: u64 = 86400 * 2;       // 最大缓存2天
-const DNS_REFRESH_INTERVAL: u64 = 86400 * 1; // DNS刷新间隔为1天
-const WEIGHT_UPDATE_INTERVAL_SEC: u64 = 3600;  //权重计时器
+const DEFAULT_TTL: u64 = 43200;         // 默认缓存12小时
+const MIN_TTL: u64 = 21600;             // 最小缓存6小时
+const MAX_TTL: u64 = 86400 * 2;         // 最大缓存2天
+const DNS_REFRESH_INTERVAL: u64 = 86400 * 1;    // DNS刷新间隔为1天
+const WEIGHT_UPDATE_INTERVAL_SEC: u64 = 3600;   //权重计时器
 const HEDGE_DELAY_MS: u64 = 1500;               // 触发第二路请求的延迟（毫秒）
 
 #[tokio::main]
@@ -219,7 +257,26 @@ async fn handle_query(
 
     // 从查询中解析域名
     let (domain, qtype) = extract_domain_from_query(&query);
-    
+
+    // 检查是否在黑名单中
+    if is_domain_blocked(&domain) {
+        // 构造NXDOMAIN响应
+        let mut response = Vec::with_capacity(query.len());
+        response.extend_from_slice(&query[0..2]); // 复制原查询ID
+        response.extend_from_slice(&[0x84, 0x03]); // 设置响应标志：QR=1, RCODE=NXDOMAIN(3)
+        response.extend_from_slice(&query[4..6]); // QDCOUNT
+        response.extend_from_slice(&[0x00, 0x00]); // ANCOUNT = 0
+        response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
+        response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0
+        response.extend_from_slice(&query[12..]); // 复制查询部分
+
+        // 记录被阻止的查询
+        println!("{}: {} - {} - BLOCKED (blacklisted)", Local::now().format("%Y-%m-%d %H:%M:%S %z"), addr.ip(), domain);
+
+        response_tx.send((response, addr)).await?;
+        return Ok(());
+    }
+
     // 为日志记录使用可读的查询类型
     let _qtype_str = match qtype {
         QueryType::A => "A",
@@ -890,7 +947,7 @@ async fn get_status(
 
             <div class="card">
             <div class="status-item">
-                <span>总请求数</span>
+                <span>DoH总请求数</span>
                 <span>{}</span>
             </div>
             <div class="status-item">
